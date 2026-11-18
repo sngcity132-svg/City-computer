@@ -1,157 +1,16 @@
 
-name: Secure-RDP
-
-on:
-  workflow_dispatch:
-
-jobs:
-  secure-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 360
-
-    steps:
-      - name: Configure RDP
-        shell: powershell
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name 'fDenyTSConnections' -Value 0
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'UserAuthentication' -Value 1
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'SecurityLayer' -Value 2
-
-          Get-NetFirewallRule -DisplayName 'RDP-Tailscale' -ErrorAction SilentlyContinue |
-            Remove-NetFirewallRule
-
-          New-NetFirewallRule `
-            -DisplayName 'RDP-Tailscale' `
-            -Direction Inbound `
-            -Protocol TCP `
-            -LocalPort 3389 `
-            -RemoteAddress '100.64.0.0/10' `
-            -Action Allow `
-            -Profile Any
-
-          Set-Service -Name TermService -StartupType Automatic
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User
-        shell: powershell
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-            throw "Configure the RDP_PASSWORD GitHub secret first."
-          }
-
-          $securePass = ConvertTo-SecureString `
-            $env:RDP_PASSWORD -AsPlainText -Force
-
-          if (Get-LocalUser -Name 'RDP' -ErrorAction SilentlyContinue) {
-            Set-LocalUser -Name 'RDP' -Password $securePass
-            Enable-LocalUser -Name 'RDP'
-          }
-          else {
-            New-LocalUser -Name 'RDP' `
-              -Password $securePass `
-              -PasswordNeverExpires `
-              -AccountNeverExpires
-          }
-
-          Add-LocalGroupMember `
-            -Group 'Remote Desktop Users' `
-            -Member 'RDP' `
-            -ErrorAction SilentlyContinue
-
-          Write-Host "RDP user configured successfully."
-
-      - name: Install Tailscale
-        shell: powershell
-        run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.104.7-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
-
-          Invoke-WebRequest -Uri $url -OutFile $installer
-
-          Start-Process msiexec.exe `
-            -ArgumentList "/i `"$installer`" /quiet /norestart" `
-            -Wait
-
-          Remove-Item $installer -Force
-
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          if (-not (Test-Path $tsExe)) {
-            throw "Tailscale installation failed."
-          }
-
-      - name: Connect Tailscale
-        shell: powershell
-        env:
-          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-            throw "Configure TAILSCALE_AUTH_KEY first."
-          }
-
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          & $tsExe up `
-            "--authkey=$env:TS_AUTHKEY" `
-            "--hostname=gh-runner-$env:GITHUB_RUN_ID"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Tailscale connection failed."
-          }
-
-          $tsIP = $null
-
-          for ($i = 0; $i -lt 20; $i++) {
-            $tsIP = (& $tsExe ip -4 | Select-Object -First 1).Trim()
-
-            if ($tsIP -match '^100\.') {
-              break
-            }
-
-            Start-Sleep -Seconds 5
-          }
-
-          if (-not $tsIP -or $tsIP -notmatch '^100\.') {
-            throw "Tailscale IP not assigned."
-          }
-
-          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-      - name: Verify RDP
-        shell: powershell
-        run: |
-          $listener = Get-NetTCPConnection `
-            -LocalPort 3389 `
-            -State Listen `
-            -ErrorAction SilentlyContinue
-
-          if (-not $listener) {
-            throw "RDP port 3389 is not listening."
-          }
-
-          Write-Host "RDP service is listening."
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-
       - name: Maintain Connection
         shell: powershell
         run: |
           Write-Host ""
           Write-Host "========== RDP ACCESS =========="
           Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Port: 3389"
           Write-Host "Username: RDP"
-          Write-Host "Password: Your RDP_PASSWORD secret"
+          Write-Host "Port: 3389"
           Write-Host "================================"
 
           while ($true) {
-            Write-Host "[$(Get-Date)] RDP connection active."
+            Write-Host "RDP Active - $(Get-Date)"
             Start-Sleep -Seconds 300
           }
           
